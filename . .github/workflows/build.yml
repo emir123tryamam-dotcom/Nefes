@@ -1,0 +1,374 @@
+name: APK derle
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Proje dosyalarini olustur
+        run: |
+          mkdir -p app/src/main/java/com/nefes/optimizer app/src/main/res/values
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Nefes"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+          android {
+              namespace = "com.nefes.optimizer"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.nefes.optimizer"
+                  minSdk = 29
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes { release { isMinifyEnabled = false } }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.3")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+              <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+              <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions" />
+              <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+              <application
+                  android:label="Nefes"
+                  android:theme="@style/Theme.Nefes">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <resources>
+              <style name="Theme.Nefes" parent="android:Theme.Material.NoActionBar" />
+          </resources>
+          EOF
+          cat > app/src/main/java/com/nefes/optimizer/MainActivity.kt <<'EOF'
+          package com.nefes.optimizer
+
+          import android.app.ActivityManager
+          import android.app.AppOpsManager
+          import android.app.usage.UsageStatsManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.net.Uri
+          import android.os.BatteryManager
+          import android.os.Bundle
+          import android.os.Environment
+          import android.os.Process
+          import android.os.StatFs
+          import android.provider.Settings
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.isSystemInDarkTheme
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.ButtonDefaults
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+
+          class MainActivity : ComponentActivity() {
+              private var tick by mutableIntStateOf(0)
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent { NefesApp(tick) }
+              }
+              override fun onResume() { super.onResume(); tick++ }
+          }
+
+          data class Snap(
+              val battery: Int, val temp: Float, val charging: Boolean,
+              val ramFreeMb: Long, val ramFreePct: Int, val ramTotalGb: Float,
+              val storageFreePct: Int, val timeoutOk: Boolean, val autoBright: Boolean
+          )
+
+          class Check(val title: String, val detail: String, val ok: Boolean, val label: String?, val act: () -> Unit)
+
+          fun snapshot(c: Context): Snap {
+              val i = c.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+              val level = i?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+              val scale = i?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+              val status = i?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+              val temp = (i?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10f
+              val mi = ActivityManager.MemoryInfo()
+              c.getSystemService(ActivityManager::class.java).getMemoryInfo(mi)
+              val st = StatFs(Environment.getDataDirectory().path)
+              val cr = c.contentResolver
+              return Snap(
+                  battery = if (level >= 0) level * 100 / scale else 0,
+                  temp = temp,
+                  charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL,
+                  ramFreeMb = mi.availMem / 1048576,
+                  ramFreePct = (mi.availMem * 100 / mi.totalMem).toInt(),
+                  ramTotalGb = mi.totalMem / 1073741824f,
+                  storageFreePct = (st.availableBytes * 100 / st.totalBytes).toInt(),
+                  timeoutOk = Settings.System.getInt(cr, Settings.System.SCREEN_OFF_TIMEOUT, 60000) <= 30000,
+                  autoBright = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, 0) ==
+                      Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
+              )
+          }
+
+          fun open(c: Context, action: String, uri: Uri? = null) {
+              try { c.startActivity(Intent(action, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } catch (_: Exception) {}
+          }
+
+          fun hasUsageAccess(c: Context): Boolean {
+              val ops = c.getSystemService(AppOpsManager::class.java)
+              return ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), c.packageName) ==
+                  AppOpsManager.MODE_ALLOWED
+          }
+
+          /** Son 24 saatte kullanılan uygulamalar için arka plan temizliği ister. Sistem uygulamalarına dokunmaz. */
+          fun cleanBackground(c: Context): Int {
+              val now = System.currentTimeMillis()
+              val usm = c.getSystemService(UsageStatsManager::class.java)
+              val am = c.getSystemService(ActivityManager::class.java)
+              val home = c.packageManager.resolveActivity(
+                  Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0
+              )?.activityInfo?.packageName
+              val pkgs = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, now - 86_400_000L, now)
+                  .map { it.packageName }.distinct()
+                  .filter { it != c.packageName && it != home && !it.startsWith("com.android.") && it != "android" }
+              pkgs.forEach { am.killBackgroundProcesses(it) }
+              return pkgs.size
+          }
+
+          fun applyDisplay(c: Context): Boolean {
+              if (!Settings.System.canWrite(c)) {
+                  open(c, Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${c.packageName}"))
+                  return false
+              }
+              val cr = c.contentResolver
+              Settings.System.putInt(cr, Settings.System.SCREEN_OFF_TIMEOUT, 30000)
+              Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC)
+              return true
+          }
+
+          @Composable
+          fun NefesApp(tick: Int) {
+              val ctx = LocalContext.current
+              val dark = isSystemInDarkTheme()
+              val bg = if (dark) Color(0xFF0E1714) else Color(0xFFF3F7F5)
+              val card = if (dark) Color(0xFF16221E) else Color.White
+              val ink = if (dark) Color(0xFFE8F1ED) else Color(0xFF14211C)
+              val mute = if (dark) Color(0xFF97AAA2) else Color(0xFF5D6E67)
+              val accent = if (dark) Color(0xFF2FD0A0) else Color(0xFF12A37A)
+              val track = if (dark) Color(0xFF25362F) else Color(0xFFDBE5E0)
+              val warn = Color(0xFFE0902B)
+
+              var snap by remember(tick) { mutableStateOf(snapshot(ctx)) }
+              var busy by remember { mutableStateOf(false) }
+              var msg by remember { mutableStateOf("") }
+              val scope = rememberCoroutineScope()
+
+              fun optimize() {
+                  if (!hasUsageAccess(ctx)) {
+                      open(ctx, Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                      msg = "Listeden Nefes’i seç ve izni aç, sonra geri dönüp tekrar dokun."
+                      return
+                  }
+                  if (!Settings.System.canWrite(ctx)) {
+                      applyDisplay(ctx)
+                      msg = "“Sistem ayarlarını değiştir” iznini aç, sonra geri dönüp tekrar dokun."
+                      return
+                  }
+                  scope.launch {
+                      busy = true; msg = "Optimize ediliyor…"
+                      val before = snapshot(ctx).ramFreeMb
+                      val n = cleanBackground(ctx)
+                      applyDisplay(ctx)
+                      delay(1200)
+                      snap = snapshot(ctx)
+                      val freed = maxOf(0L, snap.ramFreeMb - before)
+                      msg = "$n uygulama için arka plan temizliği istendi. Boşalan RAM: $freed MB. Ekran ayarları düzenlendi."
+                      busy = false
+                  }
+              }
+
+              val checks = listOf(
+                  Check("Ekran 30 saniyede kapanıyor", "Ekran, pilin en büyük tüketicisidir.", snap.timeoutOk, "Düzelt") { applyDisplay(ctx); snap = snapshot(ctx) },
+                  Check("Otomatik parlaklık açık", "Parlaklık ortam ışığına uyar.", snap.autoBright, "Düzelt") { applyDisplay(ctx); snap = snapshot(ctx) },
+                  Check("Depolamada %15’ten fazla boş yer var", "Şu an %${snap.storageFreePct} boş.", snap.storageFreePct >= 15, "Temizle") { open(ctx, Settings.ACTION_INTERNAL_STORAGE_SETTINGS) },
+                  Check("Bellek rahat", "Boş RAM: ${snap.ramFreeMb} MB (%${snap.ramFreePct}).", snap.ramFreePct >= 25, "Boşalt") { optimize() },
+                  Check("Pil sıcaklığı normal", "${snap.temp}°C", snap.temp < 40f, null) {}
+              )
+              val score = checks.count { it.ok } * 100 / checks.size
+              val sweep by animateFloatAsState(score / 100f * 360f, label = "ring")
+
+              Column(
+                  Modifier.fillMaxSize().background(bg).systemBarsPadding()
+                      .verticalScroll(rememberScrollState()).padding(16.dp)
+              ) {
+                  Text("Nefes", color = ink, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+                  Text("Pilini koru, telefonunu hızlandır.", color = mute, fontSize = 15.sp)
+                  Spacer(Modifier.height(16.dp))
+
+                  Column(
+                      Modifier.fillMaxWidth().background(card, RoundedCornerShape(28.dp)).padding(20.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally
+                  ) {
+                      Box(Modifier.size(190.dp), contentAlignment = Alignment.Center) {
+                          Canvas(Modifier.fillMaxSize()) {
+                              val w = 14.dp.toPx()
+                              val s = Size(size.width - w, size.height - w)
+                              val o = Offset(w / 2, w / 2)
+                              drawArc(track, 0f, 360f, false, o, s, style = Stroke(w))
+                              drawArc(if (score < 40) warn else accent, -90f, sweep, false, o, s, style = Stroke(w, cap = StrokeCap.Round))
+                          }
+                          Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                              Text("$score", color = ink, fontSize = 52.sp, fontWeight = FontWeight.ExtraBold)
+                              Text("telefon sağlığı", color = mute, fontSize = 13.sp)
+                          }
+                      }
+                      Spacer(Modifier.height(14.dp))
+                      Button(
+                          onClick = { optimize() }, enabled = !busy,
+                          shape = RoundedCornerShape(18.dp),
+                          colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = bg),
+                          modifier = Modifier.fillMaxWidth().height(54.dp)
+                      ) { Text(if (busy) "Çalışıyor…" else "Optimize et", fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+                      if (msg.isNotEmpty()) {
+                          Spacer(Modifier.height(10.dp))
+                          Text(msg, color = mute, fontSize = 14.sp, textAlign = TextAlign.Center)
+                      }
+                  }
+
+                  Spacer(Modifier.height(12.dp))
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      listOf(
+                          "%${snap.battery}" to (if (snap.charging) "Şarjda" else "Pil"),
+                          "%${100 - snap.ramFreePct}" to "RAM dolu",
+                          "%${100 - snap.storageFreePct}" to "Depolama"
+                      ).forEach { (v, l) ->
+                          Column(
+                              Modifier.weight(1f).background(card, RoundedCornerShape(18.dp)).padding(vertical = 12.dp),
+                              horizontalAlignment = Alignment.CenterHorizontally
+                          ) {
+                              Text(v, color = ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                              Text(l, color = mute, fontSize = 12.sp)
+                          }
+                      }
+                  }
+
+                  Spacer(Modifier.height(18.dp))
+                  Text("Durum", color = ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                  Spacer(Modifier.height(8.dp))
+                  checks.forEach { ch ->
+                      Row(
+                          Modifier.fillMaxWidth().padding(bottom = 8.dp).background(card, RoundedCornerShape(18.dp)).padding(14.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Box(Modifier.size(26.dp).background(if (ch.ok) accent else warn, CircleShape), contentAlignment = Alignment.Center) {
+                              Text(if (ch.ok) "✓" else "!", color = bg, fontWeight = FontWeight.Bold)
+                          }
+                          Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                              Text(ch.title, color = ink, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                              Text(ch.detail, color = mute, fontSize = 13.sp)
+                          }
+                          if (!ch.ok && ch.label != null) TextButton(onClick = ch.act) { Text(ch.label, color = accent, fontWeight = FontWeight.Bold) }
+                      }
+                  }
+
+                  Spacer(Modifier.height(10.dp))
+                  Text("Kısayollar", color = ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                  Spacer(Modifier.height(8.dp))
+                  listOf(
+                      Triple("Pil tasarrufu", "Düşük güç modunu ve otomatik açılışı ayarla.", Settings.ACTION_BATTERY_SAVER_SETTINGS),
+                      Triple("Uygulamaları yönet", "Kullanmadıklarını kaldır, önbelleği temizle.", Settings.ACTION_MANAGE_ALL_APPLICATIONS_SETTINGS),
+                      Triple("Animasyonları azalt", "Geliştirici seçenekleri › animasyon ölçeği 0,5x.", Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                  ).forEach { (t, d, a) ->
+                      Row(
+                          Modifier.fillMaxWidth().padding(bottom = 8.dp).background(card, RoundedCornerShape(18.dp)).padding(14.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Column(Modifier.weight(1f)) {
+                              Text(t, color = ink, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                              Text(d, color = mute, fontSize = 13.sp)
+                          }
+                          TextButton(onClick = { open(ctx, a) }) { Text("Aç", color = accent, fontWeight = FontWeight.Bold) }
+                      }
+                  }
+                  Spacer(Modifier.height(8.dp))
+                  Text(
+                      "Android, uygulamaların birbirinin önbelleğini silmesine izin vermez. Nefes, arka planı temizler, ekran ayarlarını düzenler ve geri kalanı için doğru ayar ekranını açar.",
+                      color = mute, fontSize = 12.sp, textAlign = TextAlign.Center
+                  )
+              }
+          }
+          EOF
+      - name: APK derle
+        run: gradle assembleDebug --no-daemon
+      - name: Yayinla
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Nefes v${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
